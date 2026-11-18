@@ -126,3 +126,7 @@ class Dtype(gym.Wrapper):
 
     def reset(self):
         return tools.convert(self.env.reset())
+
+    def priv_spec(self):
+        """Privileged-state layout as plain JSON (picklable across the env worker pipe)."""
+        return self.env.get_wrapper_attr("priv_spec")()

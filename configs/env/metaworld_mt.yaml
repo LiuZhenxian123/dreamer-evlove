@@ -1,0 +1,13 @@
+# Multi-task Meta-World from pixels: env i runs task i mod N, a one-hot task id is fed to
+# the encoder. Keep env_num and eval_episode_num multiples of the number of tasks.
+defaults:
+  - metaworld
+
+# MT10. Tasks of one suite are joined with '+'.
+task: 'metaworld_reach+push+pick-place+door-open+drawer-open+drawer-close+button-press-topdown+peg-insert-side+window-open+window-close'
+steps: 5.01e6
+env_num: 20
+eval_episode_num: 20
+encoder:
+  mlp_keys: '^task$'
+  cnn_keys: 'image'

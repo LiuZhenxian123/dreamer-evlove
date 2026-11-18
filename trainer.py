@@ -4,7 +4,7 @@ import tools
 
 
 class OnlineTrainer:
-    def __init__(self, config, replay_buffer, logger, logdir, train_envs, eval_envs):
+    def __init__(self, config, replay_buffer, logger, logdir, train_envs, eval_envs, sea=None, task_names=None):
         self.replay_buffer = replay_buffer
         self.logger = logger
         self.train_envs = train_envs
@@ -23,6 +23,17 @@ class OnlineTrainer:
         self._should_log = tools.Every(config.update_log_every)
         self._should_eval = tools.Every(self.eval_every)
         self._action_repeat = config.action_repeat
+        self.logdir = logdir
+        self.sea = sea
+        self.task_names = list(task_names or [])
+        self._should_save = tools.Every(int(config.save_every)) if int(config.save_every) else None
+
+    def save(self, agent, name="latest.pt"):
+        items = {
+            "agent_state_dict": agent.state_dict(),
+            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+        }
+        torch.save(items, self.logdir / name)
 
     def eval(self, agent, train_step):
         """Run evaluation episodes.
@@ -41,6 +52,7 @@ class OnlineTrainer:
         steps = torch.zeros(envs.env_num, dtype=torch.int32, device=agent.device)
         returns = torch.zeros(envs.env_num, dtype=torch.float32, device=agent.device)
         log_metrics = {}
+        task_ids = None
         # cache is only used for video logging / open-loop prediction.
         cache = []
         agent_state = agent.get_initial_state(envs.env_num)
@@ -67,6 +79,8 @@ class OnlineTrainer:
             # (B, A)
             act, agent_state = agent.act(trans, agent_state, eval=True)
             returns += trans["reward"][:, 0] * ~once_done
+            if task_ids is None and "task_id" in trans.keys():
+                task_ids = trans["task_id"][:, 0].long()
             for key, value in trans.items():
                 if key.startswith("log_"):
                     if key not in log_metrics:
@@ -81,6 +95,14 @@ class OnlineTrainer:
             if key == "log_success":
                 value = torch.clip(value, max=1.0)  # make sure 1.0 for success episode
             self.logger.scalar(f"episode/eval_{key[4:]}", value.mean())
+            if task_ids is not None and len(self.task_names) > 1:
+                for i, name in enumerate(self.task_names):
+                    if (task_ids == i).any():
+                        self.logger.scalar(f"eval_{key[4:]}/{name}", value[task_ids == i].mean())
+        if task_ids is not None and len(self.task_names) > 1:
+            for i, name in enumerate(self.task_names):
+                if (task_ids == i).any():
+                    self.logger.scalar(f"eval_score/{name}", returns[task_ids == i].mean())
         if cache is not None and "image" in cache:
             self.logger.video("eval_video", tools.to_np(cache["image"][:1]))
         if self.video_pred_log and cache is not None:
@@ -166,6 +188,8 @@ class OnlineTrainer:
                 video_cache.append(trans["image"][0])
             self.replay_buffer.add_transition(trans.detach())
             returns += trans["reward"][:, 0]
+            if self._should_save is not None and self._should_save(step):
+                self.save(agent)
             # Update models after enough data has accumulated
             if step // (envs.env_num * self._action_repeat) > self.batch_length + 1:
                 if self._should_pretrain():
@@ -175,11 +199,15 @@ class OnlineTrainer:
                 for _ in range(update_num):
                     train_metrics.add(agent.update(self.replay_buffer))
                 update_count += update_num
+                if self.sea is not None:
+                    self.sea.step(step, agent, self.replay_buffer)
                 # Log training metrics
                 if self._should_log(step):
                     for name, value in train_metrics.mean().items():
                         self.logger.scalar(f"train/{name}", value)
                     self.logger.scalar("train/opt/updates", update_count)
+                    if self.sea is not None:
+                        self.sea.log_metrics(agent)
                     if self.video_pred_log:
                         data, _, initial = self.replay_buffer.sample(prefer_online=False)
                         self.logger.video("open_loop", tools.to_np(agent.video_pred(data, initial)))

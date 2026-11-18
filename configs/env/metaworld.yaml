@@ -18,3 +18,8 @@ decoder:
   cnn_keys: 'image'
 
 camera: corner2
+
+# Object/goal layouts: random (fresh every episode) | train (50 fixed) | test (50 held-out).
+configs: random
+eval_configs: random
+config_seed: 0

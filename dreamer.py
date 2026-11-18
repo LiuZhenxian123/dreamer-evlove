@@ -14,6 +14,7 @@ import rssm
 import tools
 from networks import Projector
 from optim import LaProp, clip_grad_agc_
+from sea.targets import TargetBank
 from tools import to_f32
 
 COMPUTE_DTYPE = torch.bfloat16
@@ -21,9 +22,11 @@ MAX_CONSECUTIVE_NONFINITE = 1000
 
 
 class Dreamer(nn.Module):
-    def __init__(self, config, obs_space, act_space):
+    def __init__(self, config, obs_space, act_space, priv_spec=None, n_tasks=1):
         super().__init__()
         self.device = torch.device(config.device)
+        # bfloat16 autocast is a GPU optimisation; on CPU it is emulated and far slower.
+        self._amp = self.device.type == "cuda"
         self.act_entropy = float(config.act_entropy)
         self.kl_free = float(config.kl_free)
         self.imag_horizon = int(config.imag_horizon)
@@ -44,6 +47,18 @@ class Dreamer(nn.Module):
         )
         self.reward = networks.MLPHead(config.reward, self.rssm.feat_size)
         self.cont = networks.MLPHead(config.cont, self.rssm.feat_size)
+
+        # Semantic head: predicts LLM-evolved abstractions of the privileged state from the
+        # latent. Training-time only; acting never touches it.
+        self.sem_enabled = bool(config.sem.enabled)
+        if self.sem_enabled:
+            if priv_spec is None:
+                raise ValueError("model.sem.enabled requires an environment that emits privileged state")
+            self.targets = TargetBank(priv_spec, int(config.sem.max_dim), n_tasks, float(config.sem.norm_decay))
+            self.sem_mlp = networks.MLP(config.sem.mlp, self.rssm.feat_size)
+            self.sem_out = nn.Linear(self.sem_mlp.out_dim, int(config.sem.max_dim))
+            self.sem_mlp.apply(tools.weight_init_)
+            self.sem_out.apply(tools.weight_init_)
 
         config.actor.shape = (act_space.n,) if hasattr(act_space, "n") else tuple(map(int, act_space.shape))
         self.act_discrete = False
@@ -77,6 +92,8 @@ class Dreamer(nn.Module):
             "cont": self.cont,
             "encoder": self.encoder,
         }
+        if self.sem_enabled:
+            modules.update({"sem_mlp": self.sem_mlp, "sem_out": self.sem_out})
 
         if self.rep_loss == "dreamer":
             self.decoder = networks.MultiDecoder(
@@ -251,7 +268,7 @@ class Dreamer(nn.Module):
     @torch.no_grad()
     def act(self, obs, state, eval=False):
         """Policy inference step, in COMPUTE_DTYPE like the rest of the model."""
-        with autocast(device_type=self.device.type, dtype=COMPUTE_DTYPE):
+        with autocast(device_type=self.device.type, dtype=COMPUTE_DTYPE, enabled=self._amp):
             return self._act(obs, state, eval)
 
     @torch.no_grad()
@@ -323,12 +340,17 @@ class Dreamer(nn.Module):
         data, index, initial = replay_buffer.sample()
         torch.compiler.cudagraph_mark_step_begin()
         p_data = self.preprocess(data)
+        if self.sem_enabled:
+            task_id = data["task_id"] if "task_id" in data.keys() else None
+            p_data["sem_target"], p_data["sem_mask"] = self.targets(data["priv"], task_id)
         self._update_slow_target()
         if self.rep_loss == "dreamerpro":
             self.ema_update()
         metrics = {}
-        with autocast(device_type=self.device.type, dtype=COMPUTE_DTYPE):
-            (stoch, deter), mets = self._cal_grad(p_data, initial)
+        with autocast(device_type=self.device.type, dtype=COMPUTE_DTYPE, enabled=self._amp):
+            (stoch, deter), mets, sem_stats = self._cal_grad(p_data, initial)
+        if self.sem_enabled:
+            self.targets.observe_error(sem_stats[0].float(), sem_stats[1].float())
         if self.rep_loss == "dreamerpro" and self._ema_updates < self.freeze_prototypes_iters:
             self._prototypes.grad.zero_()
         if self._log_grads:
@@ -460,6 +482,15 @@ class Dreamer(nn.Module):
         else:
             raise NotImplementedError
 
+        # semantic targets: masked MSE on normalized abstraction values
+        sem_stats = None
+        if self.sem_enabled:
+            sem_pred = to_f32(self.sem_out(self.sem_mlp(feat)))
+            sem_mask = data["sem_mask"]
+            sem_err = (sem_pred - data["sem_target"]) ** 2 * sem_mask
+            losses["sem"] = sem_err.sum() / sem_mask.sum().clamp_min(1.0)
+            sem_stats = (sem_err.sum((0, 1)).detach(), sem_mask.sum((0, 1)).detach())
+
         # reward and continue
         losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"])))
         cont = 1.0 - to_f32(data["is_terminal"])
@@ -561,7 +592,26 @@ class Dreamer(nn.Module):
 
         metrics.update({f"loss/{name}": loss for name, loss in losses.items()})
         metrics.update({"opt/loss": total_loss})
-        return (post_stoch, post_deter), metrics
+        return (post_stoch, post_deter), metrics, sem_stats
+
+    @torch.no_grad()
+    def latent_features(self, data, initial):
+        """Posterior latent features (B, T, F) for a replay batch; used to score abstractions."""
+        p_data = self.preprocess(data.clone())
+        with autocast(device_type=self.device.type, dtype=COMPUTE_DTYPE, enabled=self._amp):
+            embed = self._frozen_encoder(p_data)
+            stoch, deter, _ = self._frozen_rssm.observe(embed, p_data["action"], initial, p_data["is_first"])
+            return to_f32(self._frozen_rssm.get_feat(stoch, deter))
+
+    @torch.no_grad()
+    def set_abstractions(self, assignments, data=None):
+        """Swap the active abstraction programs; output rows of newly assigned slots restart at zero."""
+        new_slots = self.targets.set_programs(assignments, data)
+        if new_slots:
+            idx = torch.tensor(new_slots, device=self.device)
+            self.sem_out.weight[idx] = 0.0
+            self.sem_out.bias[idx] = 0.0
+        return new_slots
 
     @torch.no_grad()
     def _imagine(self, start, imag_horizon):

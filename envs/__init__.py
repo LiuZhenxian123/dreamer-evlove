@@ -9,18 +9,38 @@ def make_envs(config):
     if suite == "isaaclab":
         return _make_isaaclab_envs(config)
 
-    def env_constructor(idx):
-        return lambda: make_env(config, idx)
+    def env_constructor(evaluation):
+        def constructor(idx):
+            return lambda: make_env(config, idx, evaluation)
 
-    train_envs = parallel.ParallelEnv(env_constructor, config.env_num, config.device)
+        return constructor
+
+    train_envs = parallel.ParallelEnv(env_constructor(False), config.env_num, config.device)
     eval_envs = (
-        parallel.ParallelEnv(env_constructor, config.eval_episode_num, config.device)
+        parallel.ParallelEnv(env_constructor(True), config.eval_episode_num, config.device)
         if config.eval_episode_num > 0
         else None
     )
     obs_space = train_envs.observation_space
     act_space = train_envs.action_space
-    return train_envs, eval_envs, obs_space, act_space
+    return train_envs, eval_envs, obs_space, act_space, env_info(config, train_envs)
+
+
+def task_list(config):
+    """Full task names. `env.task` may join several tasks of one suite with '+': 'metaworld_reach+push'."""
+    suite, names = config.task.split("_", 1)
+    return [f"{suite}_{name}" for name in names.split("+")]
+
+
+def env_info(config, envs):
+    """Privileged-state layout (None if the suite has none) and the task names."""
+    from sea.privileged import PrivSpec
+
+    suite = config.task.split("_", 1)[0]
+    spec = None
+    if suite in ("metaworld", "dmc"):
+        spec = PrivSpec.from_json(envs.envs[0].priv_spec()())
+    return {"priv_spec": spec, "tasks": task_list(config)}
 
 
 def _make_isaaclab_envs(config):
@@ -49,15 +69,20 @@ def _make_isaaclab_envs(config):
 
     obs_space = train_envs.observation_space
     act_space = train_envs.action_space
-    return train_envs, eval_envs, obs_space, act_space
+    return train_envs, eval_envs, obs_space, act_space, {"priv_spec": None, "tasks": [config.task]}
 
 
-def make_env(config, id):
-    suite, task = config.task.split("_", 1)
+def make_env(config, id, evaluation=False):
+    tasks = task_list(config)
+    task_index = id % len(tasks)
+    suite, task = tasks[task_index].split("_", 1)
+    if len(tasks) > 1 and suite != "metaworld":
+        raise NotImplementedError("multi-task runs are only supported for Meta-World (shared privileged layout)")
     if suite == "dmc":
         import envs.dmc as dmc
 
-        env = dmc.DeepMindControl(task, config.action_repeat, config.size, seed=config.seed + id)
+        shift = config.get("eval_shift" if evaluation else "shift", None)
+        env = dmc.DeepMindControl(task, config.action_repeat, config.size, seed=config.seed + id, shift=shift)
         env = wrappers.NormalizeActions(env)
     elif suite == "atari":
         import envs.atari as atari
@@ -99,6 +124,10 @@ def make_env(config, id):
             config.size,
             config.camera,
             config.seed + id,
+            configs=config.get("eval_configs" if evaluation else "configs", "random"),
+            config_seed=config.get("config_seed", 0),
+            task_index=task_index,
+            num_tasks=len(tasks),
         )
     else:
         raise NotImplementedError(suite)

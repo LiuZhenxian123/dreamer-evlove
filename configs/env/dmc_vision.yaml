@@ -16,3 +16,8 @@ encoder:
 decoder:
   mlp_keys: '$^'
   cnn_keys: 'image'
+
+# Multiplicative physics shift, e.g. {motor: 0.5, friction: 1.25}. Training uses `shift`,
+# the periodic evaluation uses `eval_shift`.
+shift: {}
+eval_shift: {}

@@ -38,3 +38,35 @@ trainer:
   params_hist_log: False
   update_log_every: 5e3
   action_repeat: ${env.action_repeat}
+  save_every: 0  # env steps between checkpoints (0: only at the end)
+
+# Self-evolving abstractions (sea/). With enabled=False this is the unmodified base agent.
+sea:
+  enabled: False
+  mode: fixed            # fixed: train on `programs`; evolve: LLM search during training
+  programs: null         # .py file, or archive/library JSON; or a {task: path} mapping
+  max_dim: 64            # target slots in the world model's semantic head
+  budget_dims: 24        # abstraction dims selected per task
+  max_redundancy: 0.9    # skip a program if the already selected ones explain this much of it
+  evolve_at: [0.03, 0.1, 0.25, 0.5]  # fractions of env.steps at which to evolve
+  dump_data_at: []       # fractions of env.steps at which to save a scoring dataset
+  data_batches: 24       # replay batches (batch_size x batch_length) per scoring dataset
+  min_sequences: 16      # per task, below this a round is skipped
+  library: null          # directory of the cross-task library (shared between runs)
+  library_write: True
+  library_dup_r2: 0.95
+  insights_every: 1      # rounds between lesson distillation (0: never)
+  refactor_every: 0      # rounds between helper extraction (0: never)
+  evolver:
+    capacity: 48
+    per_call: 4          # programs requested per LLM call
+    calls_per_gen: 3
+    generations: 3       # per evolution point
+    max_program_dim: 16
+    weights: {closure: 1.0, reward: 1.0, visible: 1.0, control: 0.25}
+    modes: {mutate: 0.5, crossover: 0.25, explore: 0.25}
+  llm:
+    model: gpt-4o        # endpoint and key come from SEA_LLM_BASE_URL / SEA_LLM_API_KEY
+    temperature: 1.0
+    max_tokens: 4096
+    extra: {}

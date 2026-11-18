@@ -1,3 +1,50 @@
+# SEA-WM: Self-Evolving Abstractions for World Models
+
+An LLM writes small programs that turn privileged simulator state into compact state
+abstractions; a **training-free fitness** scores them on replay data; the survivors become
+auxiliary prediction targets for a pixel-based Dreamer world model; and the search repeats
+during training as the agent's data and the model's blind spots change. Abstractions that
+work are kept in a library that later tasks re-score and reuse.
+
+The policy is deployed from pixels only. Privileged state and the LLM are used at training time.
+
+> Status: research code. Unit tests and CPU smoke runs pass; full GPU training, the
+> `torch.compile` path and live LLM endpoints have not been exercised yet. See
+> [EXPERIMENTS.md](EXPERIMENTS.md) for the protocol, including the pilot that decides
+> whether the fitness is predictive at all, and for what is not implemented.
+
+Built on the [R2-Dreamer](https://github.com/NM512/r2dreamer) codebase (MIT), whose README
+follows below unchanged. Everything specific to this project lives in `sea/`:
+
+| File | Role |
+|---|---|
+| `sea/privileged.py` | privileged simulator state as a named flat vector (Meta-World, DMC) |
+| `sea/program.py` | abstraction programs `phi(s)`: syntax whitelist, helper functions, execution |
+| `sea/fitness.py` | training-free score: closure, control, reward, visibility, compactness |
+| `sea/archive.py` | scored population, Pareto survival, redundancy-aware selection |
+| `sea/evolve.py`, `sea/prompts.py` | LLM proposal loop with fitness and world-model feedback |
+| `sea/library.py` | cross-task library: verified reuse, deduplication, helper extraction, lessons |
+| `sea/targets.py` | fixed-size target bank feeding the world model's semantic head |
+| `sea/runtime.py` | hooks the search into the training loop |
+| `sea/cli.py` | offline tools: sample, score, evolve, rank-correlation analysis |
+
+```bash
+pip install -e ".[dmc,metaworld]"
+export SEA_LLM_BASE_URL=https://api.openai.com/v1 SEA_LLM_API_KEY=...   # any OpenAI-compatible endpoint
+
+# evolve abstractions while training
+python train.py env=metaworld env.task=metaworld_pick-place model.rep_loss=dreamer \
+    sea.enabled=True sea.mode=evolve logdir=logdir/demo
+
+# train on a fixed set of programs (baselines, pilots, two-stage use)
+python train.py env=metaworld env.task=metaworld_pick-place sea.enabled=True sea.mode=fixed sea.programs=my_phi.py
+```
+
+With `sea.enabled=False` (the default) the agent is the unmodified base agent, except that
+Meta-World and DMC environments additionally record the privileged vector in replay.
+
+---
+
 ## R2-Dreamer: Redundancy-Reduced World Models without Decoders or Augmentation
 
 This repository provides the official implementation of [R2-Dreamer][r2dreamer] (ICLR 2026), a decoder-free, augmentation-free world model with redundancy-reducing regularization on latent representations. It also includes an efficient PyTorch DreamerV3 reproduction that trains **~5x faster** than a widely used [codebase][dreamerv3-torch], along with other baselines. Selecting R2-Dreamer via the config provides an additional **~1.6x speedup** over this baseline.

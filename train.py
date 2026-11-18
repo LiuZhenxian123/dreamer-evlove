@@ -10,6 +10,7 @@ import tools
 from buffer import Buffer
 from dreamer import Dreamer
 from envs import make_envs
+from sea.runtime import SeaRuntime
 from trainer import OnlineTrainer
 
 warnings.filterwarnings("ignore")
@@ -39,23 +40,30 @@ def main(config):
     replay_buffer = Buffer(config.buffer)
 
     print("Create envs.")
-    train_envs, eval_envs, obs_space, act_space = make_envs(config.env)
+    train_envs, eval_envs, obs_space, act_space, env_info = make_envs(config.env)
+    priv_spec, task_names = env_info["priv_spec"], env_info["tasks"]
+    if (config.sea.enabled or config.sea.dump_data_at) and priv_spec is None:
+        raise ValueError(f"env {config.env.task} does not provide privileged state; sea needs metaworld or dmc")
 
     print("Simulate agent.")
     agent = Dreamer(
         config.model,
         obs_space,
         act_space,
+        priv_spec=priv_spec,
+        n_tasks=len(task_names),
     ).to(config.device)
 
-    policy_trainer = OnlineTrainer(config.trainer, replay_buffer, logger, logdir, train_envs, eval_envs)
-    policy_trainer.begin(agent)
+    sea = None
+    if priv_spec is not None:
+        sea = SeaRuntime(config.sea, priv_spec, task_names, int(config.env.steps), logdir, logger, seed=config.seed)
+        sea.start(agent)
 
-    items_to_save = {
-        "agent_state_dict": agent.state_dict(),
-        "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-    }
-    torch.save(items_to_save, logdir / "latest.pt")
+    policy_trainer = OnlineTrainer(
+        config.trainer, replay_buffer, logger, logdir, train_envs, eval_envs, sea=sea, task_names=task_names
+    )
+    policy_trainer.begin(agent)
+    policy_trainer.save(agent)
 
 
 if __name__ == "__main__":
