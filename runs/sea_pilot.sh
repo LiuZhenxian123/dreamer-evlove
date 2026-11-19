@@ -14,12 +14,14 @@ STEPS=${STEPS:-5.1e5}          # per training run
 N_ONESHOT=${N_ONESHOT:-30}     # LLM candidates
 SEEDS=${SEEDS:-"0 1"}
 REP=${REP:-dreamer}            # dreamer (DreamerV3, with decoder) | r2dreamer (decoder-free, faster)
+BUF=${BUF:-cuda:0}             # replay storage; use cpu on shared GPUs (saves about 6 GB of GPU memory)
+EXTRA=${EXTRA:-}               # extra train.py overrides
 case $TASK in
     metaworld_*) ENV=metaworld ;;
     dmc_*) ENV=dmc_vision ;;
     *) echo "unknown suite in $TASK"; exit 1 ;;
 esac
-COMMON="env=$ENV env.task=$TASK env.steps=$STEPS model.rep_loss=$REP device=cuda:0 buffer.storage_device=cuda:0"
+COMMON="env=$ENV env.task=$TASK env.steps=$STEPS model.rep_loss=$REP device=cuda:0 buffer.storage_device=$BUF $EXTRA"
 export CUDA_VISIBLE_DEVICES=$GPU MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=$GPU
 
 case $STAGE in
