@@ -112,7 +112,7 @@ class MujocoReader:
         out = []
         for row, idx in enumerate(self._ids):
             mj.mj_objectVelocity(model, data, mj.mjtObj.mjOBJ_BODY, idx, self._vel, 0)
-            out += [data.xpos[idx], data.xquat[idx], self._vel[3:], force[row : row + 1]]
+            out += [data.xpos[idx], data.xquat[idx], self._vel[3:].copy(), force[row : row + 1]]
         if self._with_q:
             out += [data.qpos, data.qvel]
         return np.concatenate([np.asarray(x, dtype=np.float64).ravel() for x in out])

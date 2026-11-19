@@ -124,3 +124,21 @@ def test_program_runs_on_real_metaworld_state():
 '''
     out = Program(src, spec)(torch.from_numpy(np.stack([env.reset()["priv"] for _ in range(3)])))
     assert out.shape == (3, 4) and torch.isfinite(out).all() and float(out[:, 1].min()) > 0.01
+
+
+def test_body_velocities_are_per_body():
+    """Each body's velocity must be its own (regression: a shared buffer made them all equal the last body's)."""
+    import numpy as np
+    from dm_control import suite
+
+    from sea.privileged import DMCPriv
+
+    env = suite.load("walker", "run", task_kwargs={"random": 0})
+    env.reset()
+    priv = DMCPriv(env.physics)
+    rng = np.random.RandomState(0)
+    for _ in range(20):
+        env.step(rng.uniform(-1, 1, env.action_spec().shape))
+    vec = priv(env.physics)
+    torso, foot = vec[priv.spec.slices["vel.torso"]], vec[priv.spec.slices["vel.left_foot"]]
+    assert np.abs(torso - foot).max() > 1e-3
